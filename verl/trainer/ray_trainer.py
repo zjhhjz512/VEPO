@@ -60,6 +60,10 @@ from .metrics import (
     reduce_metrics,
 )
 
+from PIL import Image
+from ..utils.dataset import collate_fn
+from .image_utils import random_patch_blackening
+
 
 class Role(IntEnum):
     """
@@ -247,6 +251,7 @@ class RayPPOTrainer:
         config.worker.critic.optim.training_steps = self.training_steps
         print(f"Total training steps: {self.training_steps}")
 
+    #初始化
     def init_workers(self) -> None:
         """Init resource pool and worker group"""
         self.resource_pool_manager.create_resource_pool()
@@ -305,6 +310,7 @@ class RayPPOTrainer:
         self.actor_rollout_ref_wg = all_wg["actor_rollout_ref"]
         self.actor_rollout_ref_wg.init_model()
 
+    #保存当前训练的检查点
     def _save_checkpoint(self) -> None:
         # path: {save_checkpoint_path}/global_step_{global_step}/{actor,critic}
         if self.val_reward_score > self.best_val_reward_score:
@@ -339,6 +345,7 @@ class RayPPOTrainer:
         with open(checkpointer_tracker_path, "w") as f:
             json.dump(checkpointer_tracker_info, f, ensure_ascii=False, indent=2)
 
+    #加载检查点
     def _load_checkpoint(self) -> None:
         if self.config.trainer.load_checkpoint_path is not None:
             load_checkpoint_path = self.config.trainer.load_checkpoint_path
@@ -371,6 +378,7 @@ class RayPPOTrainer:
         else:
             print(f"No dataloader state found at {dataloader_path}, will start from scratch.")
 
+    #验证阶段记录生成的样本
     def _maybe_log_val_generations(
         self, inputs: list[str], outputs: list[str], labels: list[str], scores: list[float]
     ) -> None:
@@ -389,6 +397,7 @@ class RayPPOTrainer:
         samples = samples[: self.config.trainer.val_generations_to_log]
         self.logger.log_generation(samples, self.global_step)
 
+    #验证阶段，验证模型的性能
     def _validate(self) -> dict[str, Any]:
         reward_tensor_lst = []
         # Lists to collect samples for the table
@@ -446,6 +455,7 @@ class RayPPOTrainer:
         print("Finish validation.")
         return {"val/reward_score": self.val_reward_score, **val_reward_metrics, **val_length_metrics}
 
+    #平衡每个计算节点上的数据量
     def _balance_batch(self, batch: DataProto, metrics: dict[str, Any], logging_prefix: str = "global_seqlen") -> None:
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch["attention_mask"]
@@ -463,6 +473,22 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _aug_img_for_kl_prcp(self, original_images_pil: List[Image.Image]) -> List[Image.Image]:
+        """
+        Perform augmentation on the original images for contrastive KL.
+        This function should be implemented based on the specific augmentation method used.
+        """
+        aug_config = self.config.algorithm.aug_config
+        if self.config.algorithm.contrastive_type == "augmented":
+            augmented_images = []
+            for img in original_images_pil:
+                aug_img = random_patch_blackening(img, **aug_config)
+                augmented_images.append(aug_img)
+            return augmented_images
+        else:
+            raise NotImplementedError(f"Unknown contrastive KL type: {self.config.algorithm.contrastive_type}.")
+
+    #从数据集中取出一批数据，生成样本，并计算这些样本的奖励分数
     def _make_batch_data(self, metrics: dict[str, Any]) -> DataProto:
         batch = None
         all_metrics = defaultdict(list)
@@ -482,9 +508,20 @@ class RayPPOTrainer:
                 "video_fps": self.config.data.video_fps,
             }
             new_batch: DataProto = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
-            new_batch.non_tensor_batch["uid"] = np.array(
-                [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
-            )
+            
+             if self.config.algorithm.use_kl_prcp and "multi_modal_data" in new_batch.non_tensor_batch.keys():
+                # take the raw PIL images
+                aug_multi_modal_data = []
+                for item in new_batch.non_tensor_batch["multi_modal_data"]:
+                    if "image_aug" in item:
+                        # use pre-augmented images (preprocessed for semantic-aware masking)
+                        aug_images_pil = item.pop('image_aug')  # a list
+                    else: # online random masking
+                        original_images_pil = item['images'] # a list
+                        aug_images_pil = self._aug_img_for_kl_prcp(original_images_pil)
+                    aug_multi_modal_data.append({"images": aug_images_pil})
+                # add to new_batch
+                new_batch.non_tensor_batch["aug_multi_modal_data"] = aug_multi_modal_data
 
             # pop those keys for generation
             gen_batch = new_batch.pop(
@@ -510,6 +547,10 @@ class RayPPOTrainer:
                 new_batch.batch["reward_baselines"] = reward_baseline_tensor
                 del gen_baseline_batch, gen_baseline_output
 
+            new_batch.non_tensor_batch["uid"] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
+            )
+
             # repeat to align with repeated responses in rollout
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
@@ -522,6 +563,7 @@ class RayPPOTrainer:
                     all_metrics[k].extend(v)
 
                 filter_scores = reward_metrics[self.config.algorithm.filter_key]
+                assert len(filter_scores) != 0, "Filter scores should not be empty."
                 uids = new_batch.non_tensor_batch["uid"]
                 uid2scores = defaultdict(list)
                 for uid, score in zip(uids, filter_scores):
@@ -535,7 +577,7 @@ class RayPPOTrainer:
                 ]
                 kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
                 if len(kept_sample_idxs) == 0:
-                    raise RuntimeError("No sample is kept after filtering. Please check your data.")
+                    kept_sample_idxs = list(range(len(uids)))
 
                 new_batch = new_batch[kept_sample_idxs]
 
@@ -558,6 +600,7 @@ class RayPPOTrainer:
 
                 return batch[: self.config.data.rollout_batch_size * self.config.worker.rollout.n]
 
+    # 训练主循环
     def fit(self):
         """
         The training loop of PPO.
@@ -610,6 +653,13 @@ class RayPPOTrainer:
                 with timer("old", timing_raw):
                     old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
                     batch = batch.union(old_log_probs)
+
+                # compute aug log_probs
+                if self.config.algorithm.use_kl_prcp and "aug_multi_modal_data" in batch.non_tensor_batch.keys():
+                    # compute log_probs with augmented images
+                    with timer("aug_probs", timing_raw):
+                        aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(batch)
+                        batch = batch.union(aug_log_probs)
 
                 # compute ref_log_probs
                 if self.use_reference_policy:

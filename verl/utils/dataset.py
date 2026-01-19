@@ -96,6 +96,7 @@ class RLHFDataset(Dataset):
         processor: Optional[ProcessorMixin],
         prompt_key: str = "prompt",
         answer_key: str = "answer",
+        aug_image_key: str = "images_aug",
         image_key: str = "images",
         video_key: str = "videos",
         image_dir: Optional[str] = None,
@@ -113,6 +114,7 @@ class RLHFDataset(Dataset):
         self.prompt_key = prompt_key
         self.answer_key = answer_key
         self.image_key = image_key
+        self.aug_image_key = aug_image_key
         self.video_key = video_key
         self.image_dir = image_dir
         self.video_fps = video_fps
@@ -233,6 +235,12 @@ class RLHFDataset(Dataset):
             input_ids = model_inputs.pop("input_ids")[0]
             attention_mask = model_inputs.pop("attention_mask")[0]
             example["multi_modal_data"] = {"images": images}
+
+            #if aug image is provided
+            if self.aug_image_key in example:
+                aug_images = [self.process_image(image) for image in example.pop(self.aug_image_key)]
+                example["multi_modal_data"]["image_aug"] = aug_images
+
         elif self.video_key in example:
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             videos = example.pop(self.video_key)

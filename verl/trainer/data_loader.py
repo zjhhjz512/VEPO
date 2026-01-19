@@ -31,6 +31,7 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         prompt_key=config.prompt_key,
         answer_key=config.answer_key,
         image_key=config.image_key,
+        aug_image_key=config.aug_image_key, 
         video_key=config.video_key,
         image_dir=config.image_dir,
         video_fps=config.video_fps,
