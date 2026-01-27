@@ -426,6 +426,19 @@ class RayPPOTrainer:
             test_batch = test_batch.repeat(repeat_times=repeat_times, interleave=True)
             test_batch = test_batch.union(test_output_gen_batch)
 
+            # pad test_batch to be divisible by world_size for compute_log_probs
+            test_batch, _ = pad_dataproto_to_divisor(test_batch, self.actor_rollout_ref_wg.world_size)
+
+            if "uid" not in test_batch.non_tensor_batch:
+                test_batch.non_tensor_batch["uid"] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object
+                )
+
+            test_batch.meta_info["temperature"] = self.config.worker.rollout.temperature
+
+            test_old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(test_batch)
+            test_batch = test_batch.union(test_old_log_probs)
+
             # evaluate using reward_function
             reward_tensor, reward_metrics = ray.get(self.val_reward_fn.compute_reward.remote(test_batch))
 
@@ -473,7 +486,7 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _aug_img_for_kl_prcp(self, original_images_pil: List[Image.Image]) -> List[Image.Image]:
+    def _aug_img_for_kl_prcp(self, original_images_pil: list[Image.Image]) -> list[Image.Image]:
         """
         Perform augmentation on the original images for contrastive KL.
         This function should be implemented based on the specific augmentation method used.
@@ -482,6 +495,12 @@ class RayPPOTrainer:
         if self.config.algorithm.contrastive_type == "augmented":
             augmented_images = []
             for img in original_images_pil:
+                if isinstance(img, str):
+                    try:
+                        img = Image.open(img)
+                    except Exception as e:
+                        print(f"[WARN] Failed to open image for augmentation: {img}, error: {e}")
+                        continue
                 aug_img = random_patch_blackening(img, **aug_config)
                 augmented_images.append(aug_img)
             return augmented_images
@@ -509,7 +528,7 @@ class RayPPOTrainer:
             }
             new_batch: DataProto = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
             
-             if self.config.algorithm.use_kl_prcp and "multi_modal_data" in new_batch.non_tensor_batch.keys():
+            if self.config.algorithm.use_kl_prcp and "multi_modal_data" in new_batch.non_tensor_batch.keys():
                 # take the raw PIL images
                 aug_multi_modal_data = []
                 for item in new_batch.non_tensor_batch["multi_modal_data"]:
@@ -540,10 +559,13 @@ class RayPPOTrainer:
                 gen_baseline_output = self.actor_rollout_ref_wg.generate_sequences(gen_baseline_batch)
 
                 new_batch = new_batch.union(gen_baseline_output)
+                new_batch.meta_info["temperature"] = self.config.worker.rollout.temperature
+                baseline_log_probs = self.actor_rollout_ref_wg.compute_log_probs(new_batch)
+                new_batch = new_batch.union(baseline_log_probs)
                 reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch))
                 reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
-                new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()) + ["old_log_probs"])
                 new_batch.batch["reward_baselines"] = reward_baseline_tensor
                 del gen_baseline_batch, gen_baseline_output
 
@@ -554,6 +576,11 @@ class RayPPOTrainer:
             # repeat to align with repeated responses in rollout
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
+
+            new_batch.meta_info["temperature"] = self.config.worker.rollout.temperature
+
+            old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(new_batch)
+            new_batch = new_batch.union(old_log_probs)
 
             # filter group
             if self.config.algorithm.online_filtering:
@@ -644,22 +671,29 @@ class RayPPOTrainer:
                 # compute global valid tokens
                 batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                # compute reward
-                if "token_level_scores" not in batch.batch:
-                    with timer("reward", timing_raw):
-                        reward_ref = self.reward_fn.compute_reward.remote(batch)
-
                 # recompute old_log_probs
                 with timer("old", timing_raw):
-                    old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
-                    batch = batch.union(old_log_probs)
+                    if "old_log_probs" not in batch.batch:
+                        old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
+                        batch = batch.union(old_log_probs)
+                    else:
+                        print("Old log probs already in batch")
 
                 # compute aug log_probs
+                print(f"DEBUG: use_kl_prcp={self.config.algorithm.use_kl_prcp}")
+                print(f"DEBUG: non_tensor keys={batch.non_tensor_batch.keys()}")
                 if self.config.algorithm.use_kl_prcp and "aug_multi_modal_data" in batch.non_tensor_batch.keys():
                     # compute log_probs with augmented images
                     with timer("aug_probs", timing_raw):
                         aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(batch)
                         batch = batch.union(aug_log_probs)
+                
+                print(f"Batch keys before reward: {batch.batch.keys()}")
+
+                # compute reward
+                if "token_level_scores" not in batch.batch:
+                    with timer("reward", timing_raw):
+                        reward_ref = self.reward_fn.compute_reward.remote(batch)
 
                 # compute ref_log_probs
                 if self.use_reference_policy:

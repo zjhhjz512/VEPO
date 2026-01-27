@@ -17,7 +17,7 @@ PPO config
 
 import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from ..utils.py_functional import get_abs_path
 from ..workers.config import WorkerConfig
@@ -93,6 +93,10 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
+    use_kl_prcp: bool = False
+    """use kl perception"""
+    contrastive_type: str = "augmented"
+    aug_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

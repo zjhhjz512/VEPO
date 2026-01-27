@@ -463,8 +463,11 @@ class FSDPWorker(Worker):
         if "multi_modal_data" not in data.non_tensor_batch:
             return
 
-        if "uid" in self._cache and not np.all(data.non_tensor_batch["uid"] == self._cache["uid"]):
-            self._cache.clear()
+        if "uid" in self._cache:
+            cached_uid = self._cache["uid"]
+            current_uid = data.non_tensor_batch["uid"]
+            if cached_uid.shape != current_uid.shape or not np.all(current_uid == cached_uid):
+                self._cache.clear()
 
         if "multi_modal_inputs" not in self._cache:
             min_pixels = data.meta_info["min_pixels"]

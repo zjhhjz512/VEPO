@@ -30,6 +30,8 @@ class RewardInput(TypedDict):
     response: str
     response_length: int
     ground_truth: str
+    log_probs: Optional[torch.Tensor]
+    aug_log_probs: Optional[torch.Tensor]
 
 
 class RewardScore(TypedDict):
@@ -57,11 +59,19 @@ class SequentialFunctionRewardManagerMixin:
             response_str = self.tokenizer.decode(
                 valid_response_ids, skip_special_tokens=self.config.skip_special_tokens
             )
+            log_probs = None
+            if "old_log_probs" in data.batch:
+                log_probs = data.batch["old_log_probs"][i][:cur_response_length]
+            aug_log_probs = None
+            if "aug_log_probs" in data.batch:
+                aug_log_probs = data.batch["aug_log_probs"][i][:cur_response_length]
             score = self.reward_fn(
                 {
                     "response": response_str,
                     "response_length": cur_response_length,
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
+                    "log_probs": log_probs,
+                    "aug_log_probs": aug_log_probs,
                 }
             )
             reward_tensor[i, cur_response_length - 1] = score["overall"]
@@ -84,11 +94,27 @@ class BatchFunctionRewardManagerMixin:
             response_str = self.tokenizer.decode(
                 valid_response_ids, skip_special_tokens=self.config.skip_special_tokens
             )
+            log_probs = None
+            if "old_log_probs" in data.batch:
+                log_probs = data.batch["old_log_probs"][i][:cur_response_length]
+            aug_log_probs = None
+            if "aug_log_probs" in data.batch:
+                aug_log_probs = data.batch["aug_log_probs"][i][:cur_response_length]
+            response_tokens = [self.tokenizer.decode([tid]) for tid in valid_response_ids]
+            
+            prompt_ids = data.batch["prompts"][i]
+            prompt_ids = prompt_ids[prompt_ids != self.tokenizer.pad_token_id]
+            prompt_str = self.tokenizer.decode(prompt_ids, skip_special_tokens=self.config.skip_special_tokens)
+
             reward_inputs.append(
                 {
+                    "prompt": prompt_str,
                     "response": response_str,
+                    "response_tokens": response_tokens,
                     "response_length": cur_response_length,
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
+                    "log_probs": log_probs,
+                    "aug_log_probs": aug_log_probs,
                 }
             )
 
