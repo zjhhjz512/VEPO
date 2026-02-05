@@ -552,7 +552,7 @@ class RayPPOTrainer:
             # generate a batch
             gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
 
-            if self.config.algorithm.adv_estimator == "remax":
+            if self.config.algorithm.adv_estimator == "remax" or self.config.algorithm.use_greedy_baseline:
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["temperature"] = 0
                 gen_baseline_batch.meta_info["n"] = 1

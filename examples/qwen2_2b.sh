@@ -2,7 +2,7 @@
 
 set -x
 
-CUDA_IDS=0,1
+CUDA_IDS=6,7
 N_GPU=2
 
 TOTAL_EPOCHES=2

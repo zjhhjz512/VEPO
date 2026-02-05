@@ -33,13 +33,13 @@ algorithm:
   filter_high: 0.99
   aug_config:
     patch_size: 14
-    black_prob: 0.6
+    black_prob: 0.4
 
 worker:
   actor:
     global_batch_size: 128  # equivalent to verl's actor.ppo_mini_batch_size
-    micro_batch_size_per_device_for_update: 2  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
-    micro_batch_size_per_device_for_experience: 4  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
+    micro_batch_size_per_device_for_update: 4  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
+    micro_batch_size_per_device_for_experience: 8  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
     max_grad_norm: 1.0
     padding_free: true
     dynamic_batching: true
