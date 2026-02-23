@@ -50,17 +50,21 @@ def perception_reward(old_log_probs, aug_log_probs) -> float:
         diff = old_log_probs - aug_log_probs
         
         threshold = 1.0  # Example threshold
-        gains = torch.clamp(diff - threshold, min=0.0)
-        # gains = F.softplus(gains, beta=5)
-        penalties = torch.clamp(diff, max=0.0)
         
-        # Use sum and count instead of mean to avoid NaN on empty
-        # Also ensure we're doing float division
-        # count = max(penalties.numel(), 1)
-        # reward_score = gains.sum() + 0.5 * penalties.mean()
-        reward_score = gains.sum()
+        # Count where diff - threshold > 0
+        positive_count = ((diff - threshold) > 0).float().sum()
+        total_len = max(old_log_probs.numel(), 1.0)
         
-        reward = torch.tanh(reward_score * 0.5).item()  # Scale factor
+        # Log positive_count to file
+        try:
+            with open("perception_log.txt", "a") as f:
+                f.write(f"{positive_count.item()}\n")
+        except Exception as e:
+            print(f"[Warning] Failed to log positive_count: {e}")
+        
+        # gain = (positive_count * 15 / total_len).item()
+
+        reward = (positive_count * 20 / total_len).item()
         
         return reward
     except Exception as e:

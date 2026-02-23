@@ -93,12 +93,16 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
-    use_greedy_baseline: bool = False
-    """use greedy baseline"""
     use_kl_prcp: bool = False
     """use kl perception"""
     contrastive_type: str = "augmented"
     aug_config: dict[str, Any] = field(default_factory=dict)
+    # grpo_info_gain_weight: float = 0.3
+    # """extra coefficient for embedding-based information gain added to GRPO advantage"""
+    # grpo_info_gain_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
+    # """embedding model name for GRPO information gain"""
+    # grpo_info_gain_device: str = "cuda"
+    # """device used for embedding model in GRPO information gain"""
 
 
 @dataclass
