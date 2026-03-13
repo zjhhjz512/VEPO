@@ -97,7 +97,7 @@ class AlgorithmConfig:
     """use kl perception"""
     contrastive_type: str = "augmented"
     aug_config: dict[str, Any] = field(default_factory=dict)
-    # grpo_info_gain_weight: float = 0.3
+    # grpo_info_gain_weight: float = 0.1
     # """extra coefficient for embedding-based information gain added to GRPO advantage"""
     # grpo_info_gain_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
     # """embedding model name for GRPO information gain"""
@@ -171,6 +171,8 @@ class PPOConfig:
         self.worker.actor.use_kl_loss = self.algorithm.use_kl_loss
         self.worker.actor.kl_penalty = self.algorithm.kl_penalty
         self.worker.actor.kl_coef = self.algorithm.kl_coef
+        # self.worker.actor.grpo_info_gain_weight = self.algorithm.grpo_info_gain_weight
+        # self.worker.actor.grpo_info_gain_model_name = self.algorithm.grpo_info_gain_model_name
 
     def deep_post_init(self):
         recursive_post_init(self)

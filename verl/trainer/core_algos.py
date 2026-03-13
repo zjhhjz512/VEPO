@@ -381,7 +381,7 @@ def compute_rewards(
 
 
 def average_loss(
-    values: torch.Tensor, mask: torch.Tensor, mode: Literal["token", "seq"], eps: float = 1e-8
+    values: torch.Tensor, mask: torch.Tensor, mode: Literal["token", "seq", "seq_sum", "token_sum"], eps: float = 1e-8
 ) -> torch.Tensor:
     """Average the policy loss.
 
@@ -390,9 +390,11 @@ def average_loss(
             shape: (bs, response_length)
         mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        mode: `(Literal["token", "seq"])`
+        mode: `(Literal["token", "seq", "seq_sum", "token_sum"])`
             "token": average the loss in the whole batch
             "seq": average the loss in each sequence then average the mean of the means
+            "seq_sum": sum the loss in each sequence then average the sums over the batch
+            "token_sum": sum the losses without averaging across total valid tokens, just divided by batch size
         eps: `(float)`
             epsilon value
 
@@ -401,8 +403,13 @@ def average_loss(
     """
     if mode == "token":
         return VF.masked_mean(values, mask, eps=eps)
+    elif mode == "token_sum":
+        # Sum valid tokens but average purely by batch size (bs), so it scales with raw total tokens lengths
+        return (values * mask).sum() / values.shape[0]
     elif mode == "seq":
         return ((values * mask).sum(-1) / (mask.sum(-1) + eps)).mean()
+    elif mode == "seq_sum":
+        return ((values * mask).sum(-1)).mean()
     else:
         raise NotImplementedError(f"Unknown mode: {mode}.")
 
@@ -418,7 +425,7 @@ def compute_policy_loss(
     tau_positive: float,
     tau_negative: float,
     loss_type: Literal["default", "gspo", "gspo_token", "cispo", "sapo"],
-    loss_avg_mode: Literal["token", "seq"],
+    loss_avg_mode: Literal["token", "seq", "seq_sum", "token_sum"],
     **kwargs,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute the clipped policy objective and related metrics for PPO.

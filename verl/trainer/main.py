@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import json
-
+import copy
 import ray
 from omegaconf import OmegaConf
 
@@ -67,6 +67,10 @@ class Runner:
 
         RemoteRewardManager = ray.remote(AutoRewardManager).options(num_cpus=config.worker.reward.num_cpus)
         reward_fn = RemoteRewardManager.remote(config.worker.reward, tokenizer)
+        
+        
+        # val_reward_config = copy.deepcopy(config.worker.reward)
+        # val_reward_config.reward_function_kwargs["info_gain_weight"] = 0.0
         val_reward_fn = RemoteRewardManager.remote(config.worker.reward, tokenizer)
 
         train_dataloader, val_dataloader = create_dataloader(config.data, tokenizer, processor)

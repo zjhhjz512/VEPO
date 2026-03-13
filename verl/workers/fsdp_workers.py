@@ -552,6 +552,7 @@ class FSDPWorker(Worker):
         assert self._has_actor
 
         self._process_multi_modal_inputs(data)
+
         data = data.to(torch.cuda.current_device())
 
         if self._use_param_offload:

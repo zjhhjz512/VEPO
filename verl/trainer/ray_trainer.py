@@ -30,7 +30,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 from torchdata.stateful_dataloader import StatefulDataLoader
-from transformers import PreTrainedTokenizer, ProcessorMixin
+from transformers import PreTrainedTokenizer, ProcessorMixin, AutoModel, AutoTokenizer
 
 from ..protocol import DataProto, pad_dataproto_to_divisor, unpad_dataproto
 from ..single_controller.base import Worker
@@ -138,7 +138,12 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma: float = 1.0, lam: float = 1.0):
+def compute_advantage(
+    data: DataProto, 
+    adv_estimator: AdvantageEstimator, 
+    gamma: float = 1.0, 
+    lam: float = 1.0,
+):
     """Compute advantage estimates for policy optimization."""
     adv_inputs = {
         "token_level_rewards": data.batch["token_level_rewards"],
@@ -154,6 +159,7 @@ def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma:
         adv_inputs["reward_baselines"] = data.batch["reward_baselines"]
 
     advantages, returns = compute_advantage_return(adv_estimator, **adv_inputs)
+
     data.batch["advantages"] = advantages
     data.batch["returns"] = returns
     return data

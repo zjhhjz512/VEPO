@@ -284,7 +284,8 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss = pg_loss
 
-                    loss = loss * torch.sum(response_mask) * self.world_size / total_response_tokens
+                    if self.config.loss_avg_mode not in ["seq_sum", "token_sum"]:
+                        loss = loss * torch.sum(response_mask) * self.world_size / total_response_tokens
                     loss.backward()
 
                     batch_metrics = {f"actor/{k}": v for k, v in pg_metrics.items()}

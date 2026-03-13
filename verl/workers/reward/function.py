@@ -15,6 +15,11 @@
 import importlib.util
 import os
 import sys
+
+# # 强制绕过 Ray 的 GPU 隔离，允许 RewardManager 使用 GPU
+# if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+#     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 from collections import defaultdict
 from functools import partial
 from typing import Callable, Optional, Tuple, TypedDict
@@ -32,6 +37,7 @@ class RewardInput(TypedDict):
     ground_truth: str
     log_probs: Optional[torch.Tensor]
     aug_log_probs: Optional[torch.Tensor]
+    uid: Optional[str]
 
 
 class RewardScore(TypedDict):
@@ -72,6 +78,7 @@ class SequentialFunctionRewardManagerMixin:
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
                     "log_probs": log_probs,
                     "aug_log_probs": aug_log_probs,
+                    "uid": data.non_tensor_batch["uid"][i] if "uid" in data.non_tensor_batch else None,
                 }
             )
             reward_tensor[i, cur_response_length - 1] = score["overall"]
@@ -108,6 +115,7 @@ class BatchFunctionRewardManagerMixin:
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
                     "log_probs": log_probs,
                     "aug_log_probs": aug_log_probs,
+                    "uid": data.non_tensor_batch["uid"][i] if "uid" in data.non_tensor_batch else None,
                 }
             )
 
