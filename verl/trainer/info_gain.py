@@ -58,7 +58,8 @@ class InfoGainAdvantageCalculator:
         return embeddings
 
 def distance(a, b):
-    dis = (1 - torch.cosine_similarity(a, b)) / 2
+    # Use the last dimension so both 1D and batched tensors are supported.
+    dis = (1 - torch.cosine_similarity(a, b, dim=-1)) / 2
     return dis
 
     

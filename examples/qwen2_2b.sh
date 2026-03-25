@@ -2,7 +2,7 @@
 
 set -x
 
-CUDA_IDS=3,4
+CUDA_IDS=3,6
 N_GPU=2
 
 TOTAL_EPOCHES=2
@@ -10,6 +10,7 @@ TOTAL_EPOCHES=2
 MODEL_PATH=Qwen/Qwen2.5-VL-3B-Instruct  # replace it with your local file path
 # MODEL_PATH=Qwen/Qwen2-VL-2B-Instruct
 EXP_NAME="qwen2_5_vl_3b__grpo__ep${TOTAL_EPOCHES}_$(date +%Y%m%d_%H%M%S)"
+# EXP_NAME="qwen2_5_vl_3b__grpo__ep2_20260323_165643"
 
 CUDA_VISIBLE_DEVICES=${CUDA_IDS} python3 -m verl.trainer.main \
     config=examples/config.yaml \

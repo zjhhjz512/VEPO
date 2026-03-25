@@ -90,7 +90,7 @@ class ActorConfig:
     """clip ratio in PPO & DAPO"""
     clip_ratio_dual: float = 3.0
     """constant C in dual-clip PPO, clips when advantage < -C"""
-    loss_avg_mode: str = "token_sum"
+    loss_avg_mode: str = "token"
     """loss average mode: `token`, `seq`, `token_sum`, `seq_sum`"""
     loss_type: str = "default"
     """loss type: `default`, `gspo`, `cispo`"""
@@ -118,8 +118,7 @@ class ActorConfig:
     use_kl_loss: bool = field(default=False, init=False)
     kl_penalty: str = field(default="kl", init=False)
     kl_coef: float = field(default=0.0, init=False)
-    # grpo_info_gain_weight: float = field(default=0.0, init=False)
-    # grpo_info_gain_model_name: str = field(default="Qwen/Qwen3-Embedding-0.6B", init=False)
+    grpo_diverge_loss_weight: float = field(default=0.0, init=False)
 
 
 @dataclass

@@ -512,6 +512,7 @@ def compute_policy_loss(
         metrics["pg_clipfrac_lower"] = (clipped_pg_loss_higher > pg_loss3).float() * (advantages < 0).float()
 
     final_pg_loss = average_loss(final_pg_loss, response_mask, mode=loss_avg_mode)
+
     metrics = {k: VF.masked_mean(v, response_mask).detach().item() for k, v in metrics.items()}
     return final_pg_loss, metrics
 
