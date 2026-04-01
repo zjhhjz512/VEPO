@@ -10,7 +10,7 @@ data:
   max_response_length: 2048
   rollout_batch_size: 512  # equivalent to verl's data.train_batch_size
   mini_rollout_batch_size: null  # equivalent to verl's data.gen_batch_size
-  val_batch_size: 1024
+  val_batch_size: 512
   format_prompt: ./examples/format_prompt/math.jinja
   override_chat_template: null
   shuffle: true
@@ -38,8 +38,8 @@ algorithm:
 worker:
   actor:
     global_batch_size: 128  # equivalent to verl's actor.ppo_mini_batch_size
-    micro_batch_size_per_device_for_update: 4  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
-    micro_batch_size_per_device_for_experience: 8  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
+    micro_batch_size_per_device_for_update: 1  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
+    micro_batch_size_per_device_for_experience: 2  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
     max_grad_norm: 1.0
     padding_free: true
     dynamic_batching: true
@@ -52,9 +52,10 @@ worker:
     optim:
       lr: 1.0e-6
       weight_decay: 1.0e-2
-      strategy: adamw  # {adamw, adamw_bf16}
+      strategy: adamw_bf16  # {adamw, adamw_bf16}
       lr_warmup_ratio: 0.0
     fsdp:
+      torch_dtype: bf16
       enable_full_shard: true
       enable_cpu_offload: false
       enable_rank0_init: true

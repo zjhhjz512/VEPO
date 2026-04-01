@@ -210,7 +210,7 @@ def compute_grpo_outcome_advantage(
         id2std[idx] = torch.std(torch.tensor(id2score[idx]))
 
     for i in range(bsz):
-        scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + eps)
+        scores[i] = (scores[i] - id2mean[index[i]]) 
 
     returns = scores.unsqueeze(-1) * response_mask
     return returns, returns
