@@ -49,7 +49,7 @@ def accuracy_reward(response: str, ground_truth: str) -> float:
     return 1.0 if grade_answer(answer, ground_truth) else 0.0
 
 @torch.no_grad()
-def perception_reward(old_log_probs, aug_log_probs) -> float:
+def perception_reward(old_log_probs, aug_log_probs, token_entropy=None) -> float:
     try:
         # Placeholder for perception reward logic
         if old_log_probs is None or aug_log_probs is None:
@@ -59,25 +59,33 @@ def perception_reward(old_log_probs, aug_log_probs) -> float:
             return 0.0
 
         
-        # orig_probs = torch.exp(old_log_probs)
         diff = old_log_probs - aug_log_probs
         
         threshold = 1.0  # Example threshold
+        high_entropy_count = 0.0
+        if token_entropy is not None and token_entropy.numel() > 0:
+            entropy_threshold = torch.quantile(token_entropy.float(), 0.8).item()
+            high_entropy_count = (token_entropy > entropy_threshold).float().sum().item()
         
         # Count where diff - threshold > 0
         positive_count = ((diff - threshold) > 0).float().sum()
-        total_len = max(old_log_probs.numel(), 1.0)
+        total_len = float(old_log_probs.numel())
+        effective_len = max(total_len - high_entropy_count, 1.0)
         
         # Log positive_count to file
-        try:
-            with open("perception_log.txt", "a") as f:
-                f.write(f"{positive_count.item()}\n")
-        except Exception as e:
-            print(f"[Warning] Failed to log positive_count: {e}")
+        # try:
+        #     with open("perception_log.txt", "a") as f:
+        #         f.write(
+        #             f"positive_count={positive_count.item()},"
+        #             f"high_entropy_count={high_entropy_count},"
+        #             f"entropy_threshold_p80={entropy_threshold if token_entropy is not None and token_entropy.numel() > 0 else 'NA'}\n"
+        #         )
+        # except Exception as e:
+        #     print(f"[Warning] Failed to log positive_count: {e}")
         
         # gain = (positive_count * 15 / total_len).item()
 
-        reward = (positive_count * 20 / total_len).item()
+        reward = (positive_count * 20 / effective_len).item()
         
         return reward
     except Exception as e:
@@ -152,6 +160,7 @@ def compute_score(reward_inputs: list[dict[str, Any]], format_weight: float = 0.
         perception_score = perception_reward(
             reward_input.get("log_probs"),
             reward_input.get("aug_log_probs"),
+            reward_input.get("token_entropy"),
         )
 
         scores.append(

@@ -97,10 +97,6 @@ class AlgorithmConfig:
     """use kl perception"""
     contrastive_type: str = "augmented"
     aug_config: dict[str, Any] = field(default_factory=dict)
-    grpo_diverge_loss_weight: float = 0.0
-    """coefficient lambda for L_diverge added to actor policy loss"""
-    grpo_diverge_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    """embedding model used to compute semantic distances between grouped responses"""
 
 
 @dataclass
@@ -169,7 +165,6 @@ class PPOConfig:
         self.worker.actor.use_kl_loss = self.algorithm.use_kl_loss
         self.worker.actor.kl_penalty = self.algorithm.kl_penalty
         self.worker.actor.kl_coef = self.algorithm.kl_coef
-        self.worker.actor.grpo_diverge_loss_weight = self.algorithm.grpo_diverge_loss_weight
 
     def deep_post_init(self):
         recursive_post_init(self)

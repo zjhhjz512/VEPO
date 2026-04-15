@@ -645,10 +645,21 @@ class FSDPWorker(Worker):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.actor.compute_log_prob(data=data)
-            output = DataProto.from_dict(
-                tensors={"old_log_probs": output}, meta_info={"temperature": self.config.rollout.temperature}
-            )
+            if self.config.actor.enable_token_entropy:
+                old_log_probs, old_token_entropy = self.actor.compute_log_prob_and_entropy(data=data)
+                output = DataProto.from_dict(
+                    tensors={
+                        "old_log_probs": old_log_probs,
+                        "old_token_entropy": old_token_entropy,
+                    },
+                    meta_info={"temperature": self.config.rollout.temperature},
+                )
+            else:
+                old_log_probs = self.actor.compute_log_prob(data=data)
+                output = DataProto.from_dict(
+                    tensors={"old_log_probs": old_log_probs},
+                    meta_info={"temperature": self.config.rollout.temperature},
+                )
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
@@ -677,10 +688,8 @@ class FSDPWorker(Worker):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.actor.compute_log_prob(data=data)
-            output = DataProto.from_dict(
-                tensors={"aug_log_probs": output}, meta_info={"temperature": self.config.rollout.temperature}
-            )
+            aug_log_probs = self.actor.compute_log_prob(data=data)
+            output = DataProto.from_dict(tensors={"aug_log_probs": aug_log_probs}, meta_info={"temperature": self.config.rollout.temperature})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes

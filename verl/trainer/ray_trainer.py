@@ -192,11 +192,6 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
-        self._diverge_calculator = None
-        if self.config.algorithm.grpo_diverge_loss_weight > 0:
-            self._diverge_calculator = InfoGainAdvantageCalculator(
-                model_name=self.config.algorithm.grpo_diverge_model_name
-            )
 
         self.val_reward_score = 0.0
         self.best_val_reward_score = -1.0
@@ -264,53 +259,6 @@ class RayPPOTrainer:
         config.worker.critic.optim.training_steps = self.training_steps
         print(f"Total training steps: {self.training_steps}")
 
-    def _compute_group_average_distances(self, batch: DataProto) -> torch.Tensor:
-        """Compute leave-one-out log-det diversity score s_i for each response."""
-        response_ids = batch.batch["responses"]
-        response_mask = batch.batch["response_mask"]
-        response_lengths = torch.sum(response_mask, dim=-1).tolist()
-        responses = []
-        for i, cur_len in enumerate(response_lengths):
-            cur_len = int(cur_len)
-            valid_ids = response_ids[i][:cur_len]
-            responses.append(self.tokenizer.decode(valid_ids, skip_special_tokens=True))
-
-        if self._diverge_calculator is None or "uid" not in batch.non_tensor_batch:
-            return torch.zeros(len(responses), dtype=torch.float32)
-
-        embeddings = self._diverge_calculator.get_embeddings(responses)
-        embeddings = F.normalize(embeddings, p=2, dim=-1)
-
-        uids = batch.non_tensor_batch["uid"]
-        uid2idx = defaultdict(list)
-        for idx, uid in enumerate(uids):
-            uid2idx[uid].append(idx)
-
-        d_i = torch.zeros(len(responses), dtype=torch.float32)
-
-        for idxs in uid2idx.values():
-            group_size = len(idxs)
-            if group_size <= 1:
-                continue
-
-            group_emb = embeddings[idxs]
-            sim = torch.matmul(group_emb, group_emb.transpose(0, 1))
-            eye = torch.eye(sim.shape[0], device=sim.device, dtype=sim.dtype)
-            # Use log-det directly for better numerical stability.
-            _, logdet_full = torch.linalg.slogdet(sim + eye)
-
-            sub_logdets = []
-            for j in range(group_size):
-                idx = torch.tensor([i for i in range(group_size) if i != j], device=sim.device)
-                sub_sim = sim[idx][:, idx]
-                sub_eye = torch.eye(sub_sim.shape[0], device=sub_sim.device, dtype=sub_sim.dtype)
-                _, logdet_sub = torch.linalg.slogdet(sub_sim + sub_eye)
-                sub_logdets.append(logdet_sub)
-
-            for idx, j in enumerate(idxs):
-                d_i[j] = (logdet_full - sub_logdets[idx]).float().cpu()
-
-        return d_i
 
     #初始化
     def init_workers(self) -> None:
@@ -645,6 +593,10 @@ class RayPPOTrainer:
 
             # filter group
             if self.config.algorithm.online_filtering:
+                if self.config.algorithm.use_kl_prcp and "aug_multi_modal_data" in new_batch.non_tensor_batch.keys():
+                    aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(new_batch)
+                    new_batch = new_batch.union(aug_log_probs)
+
                 reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
                 new_batch.batch["token_level_scores"] = reward_tensor
                 for k, v in reward_metrics.items():
@@ -743,7 +695,11 @@ class RayPPOTrainer:
                 # compute aug log_probs
                 print(f"DEBUG: use_kl_prcp={self.config.algorithm.use_kl_prcp}")
                 print(f"DEBUG: non_tensor keys={batch.non_tensor_batch.keys()}")
-                if self.config.algorithm.use_kl_prcp and "aug_multi_modal_data" in batch.non_tensor_batch.keys():
+                if (
+                    self.config.algorithm.use_kl_prcp
+                    and "aug_multi_modal_data" in batch.non_tensor_batch.keys()
+                    and "aug_log_probs" not in batch.batch
+                ):
                     # compute log_probs with augmented images
                     with timer("aug_probs", timing_raw):
                         aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(batch)
@@ -792,21 +748,6 @@ class RayPPOTrainer:
                         lam=self.config.algorithm.lam,
                     )
 
-                alpha = float(self.config.algorithm.grpo_diverge_loss_weight or 0.0)
-                if alpha > 0:
-                    with timer("diverge", timing_raw):
-                        diversity_scores = self._compute_group_average_distances(batch)
-                        advantages = batch.batch["advantages"]
-                        response_mask = batch.batch["response_mask"].to(dtype=advantages.dtype)
-                        diversity_bonus = (
-                            alpha
-                            * diversity_scores.to(device=advantages.device, dtype=advantages.dtype).unsqueeze(-1)
-                            * response_mask
-                        )
-                        batch.batch["advantages"] = advantages + diversity_bonus
-
-                        metrics["actor/diversity_score"] = diversity_scores.mean().item()
-                        metrics["actor/diversity_bonus"] = (alpha * diversity_scores.mean()).item()
 
                 # update critic
                 if self.use_critic:

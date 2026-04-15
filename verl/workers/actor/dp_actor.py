@@ -62,10 +62,17 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer = actor_optimizer
         if config.use_torch_compile:
             self.log_probs_from_logits = torch.compile(VF.log_probs_from_logits, dynamic=True)
+            self.entropy_from_logits = torch.compile(VF.entropy_from_logits, dynamic=True)
         else:
             self.log_probs_from_logits = VF.log_probs_from_logits
+            self.entropy_from_logits = VF.entropy_from_logits
 
-    def _forward_micro_batch(self, micro_batch: dict[str, torch.Tensor], temperature: float) -> torch.Tensor:
+    def _forward_micro_batch(
+        self,
+        micro_batch: dict[str, torch.Tensor],
+        temperature: float,
+        return_entropy: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             log_probs: # (bs, response_len)
@@ -128,17 +135,25 @@ class DataParallelPPOActor(BasePPOActor):
             logits_rmpad.div_(temperature)
             # ((total_nnz / sp) + pad)
             log_probs = self.log_probs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+            token_entropy = self.entropy_from_logits(logits_rmpad)
 
             # gather log_prob if sp > 1
             if self.config.ulysses_size > 1:
                 # gather and unpad for the ulysses sp
                 log_probs = gather_outputs_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                token_entropy = gather_outputs_and_unpad(
+                    token_entropy, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                )
 
             # pad back to (bsz, seqlen)
             full_log_probs = pad_input(
                 hidden_states=log_probs.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
             )
             log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+            full_token_entropy = pad_input(
+                hidden_states=token_entropy.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
+            )
+            token_entropy = full_token_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
         else:
             output = self.actor_module(
                 input_ids=input_ids,
@@ -151,7 +166,9 @@ class DataParallelPPOActor(BasePPOActor):
             logits.div_(temperature)
             logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
             log_probs = self.log_probs_from_logits(logits, responses)  # (bsz, response_length)
-
+            token_entropy = self.entropy_from_logits(logits)  # (bsz, response_length)
+        if return_entropy:
+            return log_probs, token_entropy
         return log_probs
 
     def _optimizer_step(self) -> torch.Tensor:
@@ -215,6 +232,44 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
 
         return log_probs
+
+    @torch.no_grad()
+    def compute_log_prob_and_entropy(self, data: DataProto) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute response token log-prob and exact token entropy."""
+        self.actor_module.eval()
+
+        temperature = data.meta_info["temperature"]
+        select_keys = ["input_ids", "attention_mask", "position_ids", "responses"]
+        non_tensor_select_keys = ["multi_modal_inputs"]
+
+        data = data.select(select_keys, non_tensor_select_keys)
+        if self.config.dynamic_batching:
+            max_token_len = self.config.micro_batch_size_per_device_for_experience * data.batch["input_ids"].size(-1)
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+        else:
+            micro_batches = data.split(self.config.micro_batch_size_per_device_for_experience)
+
+        log_probs_lst = []
+        token_entropy_lst = []
+        if self.rank == 0:
+            micro_batches = tqdm(micro_batches, desc="Compute log probs", position=1)
+
+        for micro_batch in micro_batches:
+            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            log_probs, token_entropy = self._forward_micro_batch(
+                model_inputs, temperature=temperature, return_entropy=True
+            )
+            log_probs_lst.append(log_probs)
+            token_entropy_lst.append(token_entropy)
+
+        log_probs = torch.concat(log_probs_lst, dim=0)
+        token_entropy = torch.concat(token_entropy_lst, dim=0)
+
+        if self.config.dynamic_batching:
+            log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
+            token_entropy = restore_dynamic_batch(token_entropy, batch_idx_list)
+
+        return log_probs, token_entropy
 
     def update_policy(self, data: DataProto) -> dict[str, Any]:
         self.actor_module.train()

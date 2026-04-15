@@ -37,6 +37,7 @@ class RewardInput(TypedDict):
     ground_truth: str
     log_probs: Optional[torch.Tensor]
     aug_log_probs: Optional[torch.Tensor]
+    token_entropy: Optional[torch.Tensor]
     uid: Optional[str]
 
 
@@ -71,6 +72,9 @@ class SequentialFunctionRewardManagerMixin:
             aug_log_probs = None
             if "aug_log_probs" in data.batch:
                 aug_log_probs = data.batch["aug_log_probs"][i][:cur_response_length]
+            token_entropy = None
+            if "old_token_entropy" in data.batch:
+                token_entropy = data.batch["old_token_entropy"][i][:cur_response_length]
             score = self.reward_fn(
                 {
                     "response": response_str,
@@ -78,6 +82,7 @@ class SequentialFunctionRewardManagerMixin:
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
                     "log_probs": log_probs,
                     "aug_log_probs": aug_log_probs,
+                    "token_entropy": token_entropy,
                     "uid": data.non_tensor_batch["uid"][i] if "uid" in data.non_tensor_batch else None,
                 }
             )
@@ -107,6 +112,9 @@ class BatchFunctionRewardManagerMixin:
             aug_log_probs = None
             if "aug_log_probs" in data.batch:
                 aug_log_probs = data.batch["aug_log_probs"][i][:cur_response_length]
+            token_entropy = None
+            if "old_token_entropy" in data.batch:
+                token_entropy = data.batch["old_token_entropy"][i][:cur_response_length]
             
             reward_inputs.append(
                 {
@@ -115,6 +123,7 @@ class BatchFunctionRewardManagerMixin:
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
                     "log_probs": log_probs,
                     "aug_log_probs": aug_log_probs,
+                    "token_entropy": token_entropy,
                     "uid": data.non_tensor_batch["uid"][i] if "uid" in data.non_tensor_batch else None,
                 }
             )

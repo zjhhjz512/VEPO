@@ -104,6 +104,8 @@ class ActorConfig:
     """ulysses sequence parallel size"""
     use_torch_compile: bool = True
     """enable torch compile"""
+    enable_token_entropy: bool = True
+    """compute and return per-token entropy together with old log probs"""
     tau_positive: float = 1.0
     """temperature for positive tokens"""
     tau_negative: float = 1.05
@@ -118,7 +120,7 @@ class ActorConfig:
     use_kl_loss: bool = field(default=False, init=False)
     kl_penalty: str = field(default="kl", init=False)
     kl_coef: float = field(default=0.0, init=False)
-    grpo_diverge_loss_weight: float = field(default=0.0, init=False)
+
 
 
 @dataclass

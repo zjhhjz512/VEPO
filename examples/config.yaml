@@ -101,7 +101,7 @@ trainer:
   val_freq: 5  # -1 to disable
   val_before_train: true
   val_only: false
-  val_generations_to_log: 10
+  val_generations_to_log: 3
   save_freq: 5  # -1 to disable
   save_limit: 3  # -1 to disable
   save_model_only: false
