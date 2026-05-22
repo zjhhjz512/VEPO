@@ -8,7 +8,7 @@ data:
   video_fps: 2.0
   max_prompt_length: 2048
   max_response_length: 2048
-  rollout_batch_size: 512  # equivalent to verl's data.train_batch_size
+  rollout_batch_size: 384  # equivalent to verl's data.train_batch_size
   mini_rollout_batch_size: null  # equivalent to verl's data.gen_batch_size
   val_batch_size: 512
   format_prompt: ./examples/format_prompt/math.jinja
@@ -16,7 +16,7 @@ data:
   shuffle: true
   seed: 1
   min_pixels: 262144
-  max_pixels: 4194304
+  max_pixels: 1254400
   filter_overlong_prompts: true
 
 algorithm:
@@ -28,7 +28,7 @@ algorithm:
   kl_penalty: low_var_kl
   kl_coef: 1.0e-2
   online_filtering: false  # dapo filter groups
-  filter_key: overall
+  filter_key: accuracy
   filter_low: 0.01
   filter_high: 0.99
   aug_config:
@@ -38,8 +38,8 @@ algorithm:
 worker:
   actor:
     global_batch_size: 128  # equivalent to verl's actor.ppo_mini_batch_size
-    micro_batch_size_per_device_for_update: 1  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
-    micro_batch_size_per_device_for_experience: 2  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
+    micro_batch_size_per_device_for_update: 2  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
+    micro_batch_size_per_device_for_experience: 8  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
     max_grad_norm: 1.0
     padding_free: true
     dynamic_batching: true
@@ -68,7 +68,7 @@ worker:
     temperature: 1.0
     top_p: 1.0
     limit_images: 0
-    gpu_memory_utilization: 0.6
+    gpu_memory_utilization: 0.65
     enforce_eager: false
     enable_chunked_prefill: false
     tensor_parallel_size: 2

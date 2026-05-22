@@ -95,6 +95,22 @@ class AlgorithmConfig:
     """filter out high reward samples if online filtering"""
     use_kl_prcp: bool = False
     """use kl perception"""
+    visual_advantage_coef: float = 0.1
+    """coefficient for visual-dependence advantage injection"""
+    visual_advantage_key: str = "visual_dependence"
+    """reward metric key used as visual-dependence signal"""
+    visual_advantage_gate_key: str = "visual_adv_gate"
+    """reward metric key used as gate for visual-dependence signal"""
+    visual_advantage_group_norm: str = "zscore"
+    """group normalization for visual signal: `none`, `center`, `zscore`"""
+    visual_advantage_eps: float = 1e-6
+    """epsilon for visual signal normalization"""
+    # visual_advantage_tau_g: float = 0.6
+    # """global threshold tau_G for token-level advantage weighting. When > 0,
+    # per-token KL divergence (old_log_probs - aug_log_probs) below this threshold
+    # receives zero injection weight. 0.0 disables token-level weighting (uniform broadcast)."""
+    # visual_advantage_token_weight_eps: float = 1e-8
+    # """epsilon for token-level weight normalization denominator"""
     contrastive_type: str = "augmented"
     aug_config: dict[str, Any] = field(default_factory=dict)
 
@@ -165,6 +181,7 @@ class PPOConfig:
         self.worker.actor.use_kl_loss = self.algorithm.use_kl_loss
         self.worker.actor.kl_penalty = self.algorithm.kl_penalty
         self.worker.actor.kl_coef = self.algorithm.kl_coef
+        self.worker.actor.use_grpo_visual_token_mask = False
 
     def deep_post_init(self):
         recursive_post_init(self)

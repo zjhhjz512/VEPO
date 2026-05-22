@@ -13,9 +13,7 @@
 # limitations under the License.
 
 import re
-import math
 import torch
-import torch.nn.functional as F
 from typing import Any
 from collections import defaultdict
 
@@ -48,48 +46,29 @@ def accuracy_reward(response: str, ground_truth: str) -> float:
     answer = extract_boxed_content(response)
     return 1.0 if grade_answer(answer, ground_truth) else 0.0
 
+def _get_diff_tensor(old_log_probs, aug_log_probs):
+    if old_log_probs is None or aug_log_probs is None:
+        return None
+    if old_log_probs.numel() == 0 or aug_log_probs.numel() == 0:
+        return None
+    if old_log_probs.shape != aug_log_probs.shape:
+        return None
+    old_flat = old_log_probs.reshape(-1).float()
+    aug_flat = aug_log_probs.reshape(-1).float()
+    diff = old_flat - aug_flat
+    return torch.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 @torch.no_grad()
-def perception_reward(old_log_probs, aug_log_probs, token_entropy=None) -> float:
+def visual_dependence_score(diff: torch.Tensor | None, threshold: float) -> float:
     try:
-        # Placeholder for perception reward logic
-        if old_log_probs is None or aug_log_probs is None:
+        if diff is None or diff.numel() == 0:
             return 0.0
-        
-        if old_log_probs.numel() == 0 or aug_log_probs.numel() == 0:
-            return 0.0
-
-        
-        diff = old_log_probs - aug_log_probs
-        
-        threshold = 1.0  # Example threshold
-        high_entropy_count = 0.0
-        if token_entropy is not None and token_entropy.numel() > 0:
-            entropy_threshold = torch.quantile(token_entropy.float(), 0.8).item()
-            high_entropy_count = (token_entropy > entropy_threshold).float().sum().item()
-        
-        # Count where diff - threshold > 0
-        positive_count = ((diff - threshold) > 0).float().sum()
-        total_len = float(old_log_probs.numel())
-        effective_len = max(total_len - high_entropy_count, 1.0)
-        
-        # Log positive_count to file
-        # try:
-        #     with open("perception_log.txt", "a") as f:
-        #         f.write(
-        #             f"positive_count={positive_count.item()},"
-        #             f"high_entropy_count={high_entropy_count},"
-        #             f"entropy_threshold_p80={entropy_threshold if token_entropy is not None and token_entropy.numel() > 0 else 'NA'}\n"
-        #         )
-        # except Exception as e:
-        #     print(f"[Warning] Failed to log positive_count: {e}")
-        
-        # gain = (positive_count * 15 / total_len).item()
-
-        reward = (positive_count * 20 / effective_len).item()
-        
-        return reward
+        safe_diff = torch.nan_to_num(diff.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        exceed_sum = torch.relu(safe_diff - threshold).sum().item()
+        return exceed_sum / float(diff.numel())
     except Exception as e:
-        print(f"[Warning] perception_reward failed: {e}")
+        print(f"[Warning] visual_dependence_score failed: {e}")
         return 0.0
 
 
@@ -149,26 +128,59 @@ def perception_reward(old_log_probs, aug_log_probs, token_entropy=None) -> float
 #     return scores
 
 
-def compute_score(reward_inputs: list[dict[str, Any]], format_weight: float = 0.05, perception_weight: float = 0.5) -> list[dict[str, float]]:
+def compute_score(
+    reward_inputs: list[dict[str, Any]],
+    format_weight: float = 0.05,
+    perception_quantile: float = 0.6,
+    include_perception_in_reward: bool = False,
+    perception_weight: float = 0.5,
+) -> list[dict[str, float]]:
     scores = []
-    
-    for reward_input in reward_inputs:
+
+    perception_quantile = min(max(float(perception_quantile), 0.0), 1.0)
+
+    uids = [reward_input.get("uid") for reward_input in reward_inputs]
+    group2indices = defaultdict(list)
+    for i, uid in enumerate(uids):
+        group2indices[uid if uid is not None else f"__singleton_{i}"].append(i)
+
+    diffs = [
+        _get_diff_tensor(reward_input.get("log_probs"), reward_input.get("aug_log_probs"))
+        for reward_input in reward_inputs
+    ]
+    perception_scores = [0.0 for _ in reward_inputs]
+
+    for _, indices in group2indices.items():
+        group_diffs = [diffs[i] for i in indices if diffs[i] is not None and diffs[i].numel() > 0]
+        if not group_diffs:
+            continue
+
+        all_group_tokens = torch.cat(
+            [torch.nan_to_num(diff.float(), nan=0.0, posinf=0.0, neginf=0.0) for diff in group_diffs],
+            dim=0,
+        )
+        threshold = float(torch.quantile(all_group_tokens, perception_quantile).item())
+        for idx in indices:
+            raw_score = visual_dependence_score(diffs[idx], threshold)
+            perception_scores[idx] = float(raw_score)
+
+    for i, reward_input in enumerate(reward_inputs):
         response = re.sub(r"\s*(<|>|/)\s*", r"\1", reward_input["response"])  # handle qwen2.5vl-32b format
         format_score = format_reward(response)
         accuracy_score = accuracy_reward(response, reward_input["ground_truth"])
-        
-        perception_score = perception_reward(
-            reward_input.get("log_probs"),
-            reward_input.get("aug_log_probs"),
-            reward_input.get("token_entropy"),
-        )
+        perception_score = perception_scores[i]
+        overall_score = (1 - format_weight) * accuracy_score + format_weight * format_score
+        if include_perception_in_reward:
+            overall_score = overall_score + perception_weight * perception_score * accuracy_score
 
         scores.append(
             {
-                "overall": (1 - format_weight) * accuracy_score + format_weight * format_score + perception_weight * perception_score * accuracy_score,
+                "overall": overall_score,
                 "format": format_score,
                 "accuracy": accuracy_score,
                 "perception": perception_score,
+                "visual_dependence": perception_score,
+                "visual_adv_gate": accuracy_score,
             }
         )
 

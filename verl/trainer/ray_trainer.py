@@ -67,6 +67,9 @@ from ..utils.dataset import collate_fn
 from .image_utils import random_patch_blackening
 
 
+REWARD_METRIC_NON_TENSOR_PREFIX = "reward_metric::"
+
+
 class Role(IntEnum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -165,6 +168,164 @@ def compute_advantage(
     data.batch["advantages"] = advantages
     data.batch["returns"] = returns
     return data
+
+
+def inject_visual_advantage(
+    data: DataProto,
+    reward_metrics_raw: dict[str, list[float]],
+    coef: float,
+    value_key: str,
+    gate_key: str,
+    group_norm: str,
+    eps: float,
+    align_returns: bool,
+) -> dict[str, float]:
+    """Inject a sequence-level visual signal into token-level advantages.
+    """
+    if coef <= 0.0:
+        return {}
+    if value_key not in reward_metrics_raw:
+        return {"reward/visual_adv_injection_skipped": 1.0}
+
+    advantages = data.batch["advantages"]
+    batch_size = int(advantages.shape[0])
+    if batch_size == 0:
+        return {}
+
+    device = advantages.device
+    dtype = advantages.dtype
+    response_mask = data.batch["response_mask"].to(device=device, dtype=dtype)
+
+    raw_visual_values = reward_metrics_raw[value_key]
+    if len(raw_visual_values) != batch_size:
+        return {
+            "reward/visual_adv_injection_skipped": 1.0,
+            "reward/visual_adv_value_length_mismatch": 1.0,
+        }
+
+    visual_values = torch.as_tensor(raw_visual_values, dtype=torch.float32, device=device)
+    visual_values = torch.nan_to_num(visual_values, nan=0.0, posinf=0.0, neginf=0.0)
+
+    gate_metrics_invalid = 0.0
+    if gate_key in reward_metrics_raw:
+        raw_gates = reward_metrics_raw[gate_key]
+        if len(raw_gates) == batch_size:
+            gates = torch.as_tensor(raw_gates, dtype=torch.float32, device=device)
+            gates = torch.nan_to_num(gates, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            gates = torch.ones_like(visual_values)
+            gate_metrics_invalid = 1.0
+    else:
+        gates = torch.ones_like(visual_values)
+
+    visual_signal = visual_values * gates
+
+    normed_signal = visual_signal.clone()
+    group_norm = str(group_norm).lower()
+    invalid_group_norm = 0.0
+    if group_norm not in {"none", "center", "zscore"}:
+        group_norm = "none"
+        invalid_group_norm = 1.0
+
+    if group_norm in {"center", "zscore"}:
+        uids = data.non_tensor_batch.get("uid")
+        if uids is None:
+            uids = [None] * batch_size
+        uid2indices = defaultdict(list)
+        for i, uid in enumerate(uids):
+            uid2indices[uid if uid is not None else f"__singleton_{i}"].append(i)
+
+        for indices in uid2indices.values():
+            idx_tensor = torch.tensor(indices, device=device, dtype=torch.long)
+            group_values = visual_signal.index_select(0, idx_tensor)
+
+
+            centered = group_values - group_values.mean()
+            if group_norm == "zscore":
+                centered = centered / (centered.std(unbiased=False) + eps)
+            normed_signal.index_copy_(0, idx_tensor, centered)
+
+    injected = (coef * normed_signal).to(dtype=dtype)
+    injected_token_level = injected.unsqueeze(-1) * response_mask
+    data.batch["advantages"] = advantages + injected_token_level * advantages
+    if align_returns and "returns" in data.batch:
+        data.batch["returns"] = data.batch["returns"] + injected_token_level * data.batch["returns"]
+
+    metrics = {
+        "reward/visual_adv_signal_mean": visual_values.mean().item(),
+        "reward/visual_adv_signal_std": visual_values.std(unbiased=False).item(),
+        "reward/visual_adv_gate_mean": gates.mean().item(),
+        "reward/visual_adv_injected_mean": injected.mean().item(),
+        "reward/visual_adv_injected_std": injected.std(unbiased=False).item(),
+    }
+    if gate_metrics_invalid > 0.0:
+        metrics["reward/visual_adv_gate_length_mismatch"] = gate_metrics_invalid
+    if invalid_group_norm > 0.0:
+        metrics["reward/visual_adv_invalid_group_norm"] = invalid_group_norm
+    return metrics
+
+
+def derive_visual_dependence_from_log_probs(data: DataProto, quantile: float = 0.6) -> list[float]:
+    """Derive per-sample visual dependence directly from old/aug log probs.
+
+    This mirrors reward-side visual signal construction, but runs in trainer so
+    visual advantage injection does not depend on reward function execution order.
+    """
+    if "old_log_probs" not in data.batch or "aug_log_probs" not in data.batch:
+        return []
+
+    old_log_probs = data.batch["old_log_probs"]
+    aug_log_probs = data.batch["aug_log_probs"]
+    if "response_mask" not in data.batch:
+        return []
+    response_mask = data.batch["response_mask"]
+    if old_log_probs.shape != aug_log_probs.shape:
+        return []
+    if response_mask.shape != old_log_probs.shape:
+        return []
+
+    # Use low_var_kl estimator: exp(ref - log) - (ref - log) - 1
+    # This gives a low-variance, non-negative KL divergence estimate
+    # kld = compute_kl(log_probs=aug_log_probs, ref_log_probs=old_log_probs, kl_penalty="low_var_kl")
+    # kld = torch.nan_to_num(kld, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    kld = torch.nan_to_num(old_log_probs.float() - aug_log_probs.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    response_mask = response_mask.to(device=kld.device, dtype=torch.bool)
+    batch_size = int(kld.shape[0])
+    if batch_size == 0:
+        return []
+
+    quantile = min(max(float(quantile), 0.0), 1.0)
+    uids = data.non_tensor_batch.get("uid")
+    if uids is None:
+        uids = [None] * batch_size
+
+    uid2indices = defaultdict(list)
+    for i, uid in enumerate(uids):
+        uid2indices[uid if uid is not None else f"__singleton_{i}"].append(i)
+
+    visual_scores = [0.0 for _ in range(batch_size)]
+    for indices in uid2indices.values():
+        idx_tensor = torch.tensor(indices, device=kld.device, dtype=torch.long)
+        group_kld = kld.index_select(0, idx_tensor)
+        group_mask = response_mask.index_select(0, idx_tensor)
+        if group_kld.numel() == 0 or group_mask.numel() == 0:
+            continue
+
+        # Match reward-side behavior: only use valid response tokens.
+        group_tokens = group_kld[group_mask]
+        if group_tokens.numel() == 0:
+            continue
+        threshold = float(torch.quantile(group_tokens, quantile).item())
+        for local_idx, global_idx in enumerate(indices):
+            sample_tokens = group_kld[local_idx][group_mask[local_idx]]
+            if sample_tokens.numel() == 0:
+                visual_scores[global_idx] = 0.0
+                continue
+            sample_score = torch.relu(sample_tokens - threshold).mean()
+            visual_scores[global_idx] = float(sample_score.item())
+
+    return visual_scores
 
 
 class RayPPOTrainer:
@@ -593,14 +754,21 @@ class RayPPOTrainer:
 
             # filter group
             if self.config.algorithm.online_filtering:
-                if self.config.algorithm.use_kl_prcp and "aug_multi_modal_data" in new_batch.non_tensor_batch.keys():
-                    aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(new_batch)
-                    new_batch = new_batch.union(aug_log_probs)
-
                 reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
                 new_batch.batch["token_level_scores"] = reward_tensor
                 for k, v in reward_metrics.items():
                     all_metrics[k].extend(v)
+
+                # Persist visual-related reward metrics so later stages (e.g., visual advantage injection)
+                # can still access per-sample signals when token_level_scores are already present.
+                metric_keys_to_persist = {
+                    self.config.algorithm.visual_advantage_key,
+                    self.config.algorithm.visual_advantage_gate_key,
+                }
+                for metric_key in metric_keys_to_persist:
+                    if metric_key in reward_metrics and len(reward_metrics[metric_key]) == len(new_batch):
+                        metric_values = np.asarray(reward_metrics[metric_key], dtype=np.float32)
+                        new_batch.non_tensor_batch[f"{REWARD_METRIC_NON_TENSOR_PREFIX}{metric_key}"] = metric_values
 
                 filter_scores = reward_metrics[self.config.algorithm.filter_key]
                 assert len(filter_scores) != 0, "Filter scores should not be empty."
@@ -693,19 +861,16 @@ class RayPPOTrainer:
                         print("Old log probs already in batch")
 
                 # compute aug log_probs
-                print(f"DEBUG: use_kl_prcp={self.config.algorithm.use_kl_prcp}")
-                print(f"DEBUG: non_tensor keys={batch.non_tensor_batch.keys()}")
-                if (
-                    self.config.algorithm.use_kl_prcp
-                    and "aug_multi_modal_data" in batch.non_tensor_batch.keys()
-                    and "aug_log_probs" not in batch.batch
-                ):
+                # print(f"DEBUG: use_kl_prcp={self.config.algorithm.use_kl_prcp}")
+                # print(f"DEBUG: non_tensor keys={batch.non_tensor_batch.keys()}")
+                if self.config.algorithm.use_kl_prcp and "aug_multi_modal_data" in batch.non_tensor_batch.keys():
                     # compute log_probs with augmented images
-                    with timer("aug_probs", timing_raw):
-                        aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(batch)
-                        batch = batch.union(aug_log_probs)
+                    if "aug_log_probs" not in batch.batch:
+                        with timer("aug_probs", timing_raw):
+                            aug_log_probs = self.actor_rollout_ref_wg.compute_log_probs_aug(batch)
+                            batch = batch.union(aug_log_probs)
                 
-                print(f"Batch keys before reward: {batch.batch.keys()}")
+                # print(f"Batch keys before reward: {batch.batch.keys()}")
 
                 # compute reward
                 if "token_level_scores" not in batch.batch:
@@ -727,10 +892,44 @@ class RayPPOTrainer:
                 with timer("adv", timing_raw):
                     if "token_level_scores" not in batch.batch:
                         # get token level scores asynchronously
-                        reward_tensor, reward_metrics = ray.get(reward_ref)
+                        reward_tensor, reward_metrics_raw = ray.get(reward_ref)
                         batch.batch["token_level_scores"] = reward_tensor
-                        reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
+                        reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics_raw).items()}
                         metrics.update(reward_metrics)
+                    else:
+                        reward_metrics_raw = {}
+                        metric_keys_to_restore = {
+                            self.config.algorithm.visual_advantage_key,
+                            self.config.algorithm.visual_advantage_gate_key,
+                        }
+                        for metric_key in metric_keys_to_restore:
+                            storage_key = f"{REWARD_METRIC_NON_TENSOR_PREFIX}{metric_key}"
+                            if storage_key in batch.non_tensor_batch:
+                                values = batch.non_tensor_batch[storage_key]
+                                reward_metrics_raw[metric_key] = [float(v) for v in values]
+
+                        # For DAPO online filtering, reward is computed earlier and may not include
+                        # aug-log-prob-based visual signal. Derive visual dependence here directly
+                        # from old/aug log_probs so injection can still work without extra reward pass.
+                        value_key = self.config.algorithm.visual_advantage_key
+                        restored_values = reward_metrics_raw.get(value_key)
+                        has_valid_restored_values = (
+                            restored_values is not None
+                            and len(restored_values) == len(batch)
+                            and any(abs(float(v)) > 1e-12 for v in restored_values)
+                        )
+                        if (
+                            not has_valid_restored_values
+                            and self.config.algorithm.use_kl_prcp
+                            and "aug_log_probs" in batch.batch
+                            and "old_log_probs" in batch.batch
+                        ):
+                            derived_scores = derive_visual_dependence_from_log_probs(batch)
+                            if len(derived_scores) == len(batch):
+                                reward_metrics_raw[value_key] = derived_scores
+                                metrics["reward/visual_dependence"] = float(np.mean(derived_scores))
+                                metrics["reward/visual_adv_signal_derived_from_log_probs"] = 1.0
+                                metrics["reward/visual_dependence_source_is_derived"] = 1.0
 
                     # apply kl penalty if available
                     if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
@@ -747,6 +946,18 @@ class RayPPOTrainer:
                         gamma=self.config.algorithm.gamma,
                         lam=self.config.algorithm.lam,
                     )
+
+                    visual_adv_metrics = inject_visual_advantage(
+                        data=batch,
+                        reward_metrics_raw=reward_metrics_raw,
+                        coef=self.config.algorithm.visual_advantage_coef,
+                        value_key=self.config.algorithm.visual_advantage_key,
+                        gate_key=self.config.algorithm.visual_advantage_gate_key,
+                        group_norm=self.config.algorithm.visual_advantage_group_norm,
+                        eps=self.config.algorithm.visual_advantage_eps,
+                        align_returns=self.use_critic,
+                     )
+                    metrics.update(visual_adv_metrics)
 
 
                 # update critic

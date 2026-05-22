@@ -426,6 +426,7 @@ def compute_policy_loss(
     tau_negative: float,
     loss_type: Literal["default", "gspo", "gspo_token", "cispo", "sapo"],
     loss_avg_mode: Literal["token", "seq", "seq_sum", "token_sum"],
+    token_update_mask: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute the clipped policy objective and related metrics for PPO.
@@ -510,6 +511,11 @@ def compute_policy_loss(
         clipped_pg_loss_lower = torch.min(clipped_pg_loss_higher, pg_loss3)  # clip if pg_loss > pg_loss3 and adv < 0
         final_pg_loss = torch.where(advantages < 0, clipped_pg_loss_lower, clipped_pg_loss_higher)
         metrics["pg_clipfrac_lower"] = (clipped_pg_loss_higher > pg_loss3).float() * (advantages < 0).float()
+
+    if token_update_mask is not None:
+        token_update_mask = token_update_mask.to(final_pg_loss.dtype) * response_mask
+        final_pg_loss = final_pg_loss * token_update_mask
+        metrics["token_update_ratio"] = token_update_mask
 
     final_pg_loss = average_loss(final_pg_loss, response_mask, mode=loss_avg_mode)
 

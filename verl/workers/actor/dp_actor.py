@@ -19,6 +19,7 @@ import os
 from collections import defaultdict
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from einops import rearrange
@@ -277,6 +278,8 @@ class DataParallelPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
         select_keys = ["input_ids", "attention_mask", "position_ids", "responses", "response_mask"]
         select_keys.extend(["old_log_probs", "ref_log_probs", "advantages"])
+        if self.config.use_grpo_visual_token_mask and "aug_log_probs" in data.batch:
+            select_keys.append("aug_log_probs")
         non_tensor_select_keys = ["multi_modal_inputs"]
 
         # Split to make minibatch iterator for updating the actor
@@ -307,6 +310,26 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask = model_inputs["response_mask"]
                     old_log_probs = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
+                    visual_token_mask = None
+                    if self.config.use_grpo_visual_token_mask and "aug_log_probs" in model_inputs:
+                        aug_log_probs = model_inputs["aug_log_probs"]
+                        # Directional score: keep tokens whose prob drops after masking visual info.
+                        diff_scores = old_log_probs - aug_log_probs
+                        diff_scores = diff_scores.masked_fill(diff_scores <= 0, float("-inf"))
+                        masked_diff_scores = diff_scores.masked_fill(response_mask <= 0, float("-inf"))
+                        visual_token_mask = torch.zeros_like(response_mask, dtype=old_log_probs.dtype)
+                        valid_token_counts = response_mask.sum(dim=-1).to(torch.int64)
+                        for i in range(masked_diff_scores.size(0)):
+                            valid_count = int(valid_token_counts[i].item())
+                            if valid_count <= 0:
+                                continue
+                            keep_count = max(1, int(np.ceil(valid_count * 0.4)))
+                            positive_count = int(torch.isfinite(masked_diff_scores[i]).sum().item())
+                            if positive_count <= 0:
+                                continue
+                            keep_count = min(keep_count, positive_count)
+                            topk_idx = torch.topk(masked_diff_scores[i], k=keep_count, dim=-1).indices
+                            visual_token_mask[i, topk_idx] = 1.0
 
                     # all return: (bsz, response_length)
                     log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
@@ -323,6 +346,7 @@ class DataParallelPPOActor(BasePPOActor):
                         tau_negative=self.config.tau_negative,
                         loss_type=self.config.loss_type,
                         loss_avg_mode=self.config.loss_avg_mode,
+                        token_update_mask=visual_token_mask,
                     )
                     if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]
