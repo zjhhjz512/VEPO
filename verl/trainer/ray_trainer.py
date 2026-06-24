@@ -268,8 +268,9 @@ def inject_visual_advantage(
 def derive_visual_dependence_from_log_probs(data: DataProto, quantile: float = 0.6) -> list[float]:
     """Derive per-sample visual dependence directly from old/aug log probs.
 
-    This mirrors reward-side visual signal construction, but runs in trainer so
-    visual advantage injection does not depend on reward function execution order.
+    This runs in trainer so visual advantage injection does not depend on reward
+    function execution order. Each sample score is the mean delta across all
+    valid response tokens in that trajectory.
     """
     if "old_log_probs" not in data.batch or "aug_log_probs" not in data.batch:
         return []
@@ -295,7 +296,6 @@ def derive_visual_dependence_from_log_probs(data: DataProto, quantile: float = 0
     if batch_size == 0:
         return []
 
-    quantile = min(max(float(quantile), 0.0), 1.0)
     uids = data.non_tensor_batch.get("uid")
     if uids is None:
         uids = [None] * batch_size
@@ -312,17 +312,13 @@ def derive_visual_dependence_from_log_probs(data: DataProto, quantile: float = 0
         if group_kld.numel() == 0 or group_mask.numel() == 0:
             continue
 
-        # Match reward-side behavior: only use valid response tokens.
-        group_tokens = group_kld[group_mask]
-        if group_tokens.numel() == 0:
-            continue
-        threshold = float(torch.quantile(group_tokens, quantile).item())
+        # Use all valid response-token deltas for each trajectory.
         for local_idx, global_idx in enumerate(indices):
             sample_tokens = group_kld[local_idx][group_mask[local_idx]]
             if sample_tokens.numel() == 0:
                 visual_scores[global_idx] = 0.0
                 continue
-            sample_score = torch.relu(sample_tokens - threshold).mean()
+            sample_score = sample_tokens.mean()
             visual_scores[global_idx] = float(sample_score.item())
 
     return visual_scores
