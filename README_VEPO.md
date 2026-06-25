@@ -98,6 +98,11 @@ algorithm:
 examples/config.yaml
 ```
 
+运行脚本：
+```text
+examples/qwen2_5_3b_vepo.sh
+```
+
 ### Data Format / 数据格式
 
 Trainer 支持 EasyR1 标准的多模态数据格式。对于感知增强训练，每条样本可以额外提供预处理好的增强图像：
